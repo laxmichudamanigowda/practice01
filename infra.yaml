@@ -1,0 +1,86 @@
+name: Infra Provisioning through Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy (dev, staging, prod)"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write   
+  id-token: write  
+
+jobs:
+  terraform:
+    name: Terraform Deployment
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout Repository
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # Step 2: Set Deployment Environment Variable
+      - name: Set Deployment Environment
+        run: echo "DEPLOY_ENV=${{ github.event.inputs.environment || 'dev' }}" >> $GITHUB_ENV
+
+      # Step 3: Configure AWS Credentials Based on Environment
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets[format('AWS_ACCOUNT_ID_{0}', env.DEPLOY_ENV)] }}:role/GitHubActionsRole
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 4: Set up Terraform
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      # Step 5: Initialize Terraform Backend Config for Selected Environment
+      - name: Terraform Init
+        run: |
+          cd infra/
+          terraform init -backend-config=../environment/${{ env.DEPLOY_ENV }}.backend
+
+      # Step 6: Validate Terraform Configuration
+      - name: Terraform Validate
+        run: |
+          cd infra/
+          terraform validate
+
+      # Step 7: Terraform Plan
+      - name: Terraform Plan
+        run: |
+          cd infra/
+          terraform plan -var-file=environment/${{ env.DEPLOY_ENV }}.tfvars -out=tfplan
+
+      # Step 8: Terraform Apply (Only on Push)
+      - name: Terraform Apply
+        if: github.event_name == 'push'
+        run: |
+          cd infra/
+          terraform apply -auto-approve tfplan
+
+      # Step 9: Terraform Destroy (Only if manually triggered with "destroy")
+      - name: Terraform Destroy
+        if: github.event_name == 'workflow_dispatch' && env.DEPLOY_ENV == 'destroy'
+        run: |
+          cd infra/
+          terraform destroy -auto-approve -var-file=environment/${{ env.DEPLOY_ENV }}.tfvars
